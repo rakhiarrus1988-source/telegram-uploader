@@ -35,7 +35,7 @@ async def download_from_mega(link, dest_dir):
                 print("   ⚠️ Login failed. Trying next...")
                 continue
             
-            node = m.get_node_from_link(link)
+            node = m.get_node_from_link(link)   # original link, no conversion
             if node is None:
                 print("   ⚠️ Could not get node. Trying next...")
                 continue
@@ -43,7 +43,6 @@ async def download_from_mega(link, dest_dir):
             node_type = node.get('type')  # 0=file, 1=folder
             current_folder_id = node.get('id')
             
-            # Reset progress if folder ID changed
             if folder_id and folder_id != current_folder_id:
                 print("   ⚠️ Folder ID changed. Resetting progress.")
                 completed_files = []
@@ -114,21 +113,19 @@ async def download_from_mega(link, dest_dir):
                 print(f"   ⚠️ Proxy error: {e}")
             continue
     
-    # ----- FALLBACK: megadl (with progress) -----
-    print("\n   🔧 All proxies failed. Trying megadl fallback...")
+    # ----- FALLBACK: megadl WITHOUT conversion -----
+    print("\n   🔧 All proxies failed. Trying megadl fallback (no conversion)...")
     return await fallback_megadl(link, dest_dir)
 
 
 async def download_file_with_progress(m, node, dest_path):
-    """Download a single file with real-time progress bar."""
+    """Download with real‑time progress (percentage, speed, ETA)."""
     file_name = node.get('name')
     expected_size = node.get('size')
     
-    # Check if already exists
-    if os.path.exists(dest_path) and expected_size:
-        if os.path.getsize(dest_path) == expected_size:
-            print(f"      ✅ Already downloaded: {file_name}")
-            return True
+    if os.path.exists(dest_path) and expected_size and os.path.getsize(dest_path) == expected_size:
+        print(f"      ✅ Already downloaded: {file_name}")
+        return True
     
     try:
         start_time = time.time()
@@ -136,72 +133,47 @@ async def download_file_with_progress(m, node, dest_path):
         
         def progress_callback(current, total):
             nonlocal last_update
-            if time.time() - last_update > 0.3:
+            if time.time() - last_update > 0.2:  # update every 0.2 sec
                 percent = (current / total) * 100
                 elapsed = time.time() - start_time
                 speed = current / elapsed if elapsed > 0 else 0
-                
-                if speed > 1024**2:
-                    speed_str = f"{speed/(1024**2):.2f} MB/s"
-                elif speed > 1024:
-                    speed_str = f"{speed/1024:.2f} KB/s"
-                else:
-                    speed_str = f"{speed:.2f} B/s"
-                
-                if speed > 0:
-                    remaining = (total - current) / speed
-                    eta = time.strftime("%H:%M:%S", time.gmtime(remaining))
-                else:
-                    eta = "calculating..."
-                
+                speed_str = f"{speed/(1024**2):.2f} MB/s" if speed > 1024**2 else f"{speed/1024:.2f} KB/s"
+                eta = time.strftime("%H:%M:%S", time.gmtime((total-current)/speed)) if speed > 0 else "calculating..."
                 print(f"\r      📥 Downloading: {percent:.1f}% | Speed: {speed_str} | ETA: {eta}    ", end='')
                 last_update = time.time()
         
-        # Download with progress
         m.download_node(node, dest_path, progress_callback)
-        print()  # newline after progress bar
+        print()  # newline
         print(f"      ✅ Downloaded: {file_name}")
         return True
-        
     except Exception as e:
-        error_msg = str(e).lower()
-        if "quota" in error_msg or "509" in error_msg:
+        if "quota" in str(e).lower():
             print(f"      ⚠️ Quota exceeded.")
         else:
-            print(f"      ❌ Error downloading {file_name}: {e}")
+            print(f"      ❌ Error: {e}")
         return False
 
 
 def get_all_files(m, node):
-    """Recursively get all file nodes inside a folder."""
     files = []
     try:
         children = m.get_files_in_node(node)
         for child in children:
-            if child['type'] == 0:  # file
+            if child['type'] == 0:
                 files.append(child)
-            elif child['type'] == 1:  # subfolder
-                sub_node = m.get_node_by_id(child['id'])
-                files.extend(get_all_files(m, sub_node))
+            elif child['type'] == 1:
+                sub = m.get_node_by_id(child['id'])
+                files.extend(get_all_files(m, sub))
     except Exception as e:
         print(f"   ⚠️ Error getting files: {e}")
     return files
 
 
 async def fallback_megadl(link, dest_dir):
-    """Fallback to megadl with progress parsing."""
-    print("   🔧 Using megadl fallback...")
-    
-    # Convert link format if needed (optional)
-    import re
-    converted = link
-    match = re.match(r'https?://mega\.nz/folder/([^#]+)#(.+)', link)
-    if match:
-        converted = f"https://mega.nz/#F!{match.group(1)}!{match.group(2)}"
-        print(f"   🔄 Converted to: {converted}")
-    
-    cmd = f'megadl --path "{dest_dir}" "{converted}"'
-    print(f"   🔧 Running: {cmd}")
+    """Fallback using megadl – original link, NO conversion."""
+    print("   🔧 Running megadl with original link...")
+    cmd = f'megadl --path "{dest_dir}" "{link}"'
+    print(f"   🔧 Command: {cmd}")
     
     process = subprocess.Popen(
         cmd,
@@ -212,7 +184,6 @@ async def fallback_megadl(link, dest_dir):
         bufsize=1
     )
     
-    output_lines = []
     while True:
         line = process.stdout.readline()
         if not line:
@@ -220,25 +191,16 @@ async def fallback_megadl(link, dest_dir):
                 break
             continue
         line = line.strip()
-        output_lines.append(line)
-        # Show progress if any
         if "%" in line or "Downloaded" in line:
             print(f"\r   📥 {line}", end='')
-    
     print()
+    
     if process.returncode != 0:
         print(f"❌ megadl failed with code {process.returncode}")
-        for line in output_lines[-5:]:
-            print(f"   {line}")
         return None
     
-    all_items = [p for p in Path(dest_dir).iterdir() if not p.name.startswith('.')]
-    if not all_items:
-        print("❌ No files/folders downloaded.")
-        return None
-    
-    print(f"📁 Downloaded {len(all_items)} item(s).")
-    return all_items[0] if len(all_items) == 1 else all_items[0]
+    items = [p for p in Path(dest_dir).iterdir() if not p.name.startswith('.')]
+    return items[0] if items else None
 
 
 def load_progress():
@@ -248,8 +210,8 @@ def load_progress():
     except:
         return None
 
-def save_progress(completed_files, folder_id):
-    data = {"completed": completed_files, "folder_id": folder_id, "timestamp": time.time()}
+def save_progress(completed, folder_id):
+    data = {"completed": completed, "folder_id": folder_id, "timestamp": time.time()}
     try:
         with open(PROGRESS_FILE, 'w') as f:
             json.dump(data, f, indent=4)
