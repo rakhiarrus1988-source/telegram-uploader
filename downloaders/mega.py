@@ -3,25 +3,19 @@ import json
 import time
 from pathlib import Path
 from mega import Mega
-from proxy_manager import ProxyManager
+from .proxy_manager import ProxyManager   # <- relative import
 
 # ----- Google Drive progress file -----
 PROGRESS_FILE = "/content/drive/MyDrive/mega_download_progress.json"
 
 async def download_from_mega(link, dest_dir):
-    """
-    Mega downloader using proxy_manager to get working proxies.
-    Supports resume, auto-rotation, and fallback.
-    """
     print(f"⬇️ Downloading from Mega: {link}")
     os.makedirs(dest_dir, exist_ok=True)
     
-    # Load progress from Drive
     progress = load_progress()
     completed_files = progress.get("completed", []) if progress else []
     folder_id = progress.get("folder_id") if progress else None
     
-    # Get working proxies
     proxy_mgr = ProxyManager(max_proxies=10, timeout=5)
     proxies = proxy_mgr.get_working_proxies(limit=5)
     
@@ -39,16 +33,14 @@ async def download_from_mega(link, dest_dir):
                 print("   ⚠️ Login failed. Trying next proxy...")
                 continue
             
-            # Get node from link
             node = m.get_node_from_link(link)
             if node is None:
                 print("   ⚠️ Could not get node. Trying next proxy...")
                 continue
             
-            node_type = node.get('type')  # 0=file, 1=folder
+            node_type = node.get('type')
             current_folder_id = node.get('id')
             
-            # Reset progress if folder ID changed
             if folder_id and folder_id != current_folder_id:
                 print("   ⚠️ Folder ID changed. Resetting progress.")
                 completed_files = []
@@ -57,7 +49,6 @@ async def download_from_mega(link, dest_dir):
             
             progress = {'folder_id': current_folder_id}
             
-            # ----- File -----
             if node_type == 0:
                 file_name = node.get('name')
                 dest_path = os.path.join(dest_dir, file_name)
@@ -68,7 +59,6 @@ async def download_from_mega(link, dest_dir):
                 else:
                     continue
             
-            # ----- Folder -----
             elif node_type == 1:
                 folder_name = node.get('name')
                 folder_path = os.path.join(dest_dir, folder_name)
@@ -88,7 +78,6 @@ async def download_from_mega(link, dest_dir):
                 
                 print(f"   📂 Folder: {folder_name} - {len(remaining)}/{total} files remaining")
                 
-                # Download each file
                 success_count = 0
                 for idx, file_node in enumerate(remaining, start=1):
                     file_name = file_node['name']
@@ -103,12 +92,10 @@ async def download_from_mega(link, dest_dir):
                         print(f"   ❌ Failed to download: {file_name}")
                         break
                 else:
-                    # All done
                     print(f"\n   ✅ Folder fully downloaded: {folder_name}")
                     delete_progress()
                     return Path(folder_path)
                 
-                # If incomplete, try next proxy
                 if success_count < len(remaining):
                     print(f"   ⚠️ Only {success_count}/{len(remaining)} files downloaded. Trying next proxy...")
                     continue
@@ -128,14 +115,11 @@ async def download_from_mega(link, dest_dir):
     return None
 
 async def download_file_node(m, node, dest_path):
-    """Download a single file with progress callback."""
     file_name = node.get('name')
     expected_size = node.get('size')
-    
     if os.path.exists(dest_path) and expected_size and os.path.getsize(dest_path) == expected_size:
         print(f"      ✅ Already downloaded: {file_name}")
         return True
-    
     try:
         start_time = time.time()
         def progress_callback(current, total):
@@ -145,7 +129,6 @@ async def download_file_node(m, node, dest_path):
             speed_str = f"{speed/(1024**2):.2f} MB/s" if speed > 1024**2 else f"{speed/1024:.2f} KB/s"
             eta = time.strftime("%H:%M:%S", time.gmtime((total-current)/speed)) if speed > 0 else "calculating..."
             print(f"\r      📥 Downloading: {percent:.1f}% | Speed: {speed_str} | ETA: {eta}    ", end='')
-        
         m.download_node(node, dest_path, progress_callback)
         print()
         print(f"      ✅ Downloaded: {file_name}")
@@ -158,7 +141,6 @@ async def download_file_node(m, node, dest_path):
         return False
 
 def get_all_files(m, node):
-    """Recursively get all file nodes inside a folder."""
     files = []
     try:
         children = m.get_files_in_node(node)
