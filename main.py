@@ -92,13 +92,25 @@ async def main():
                 print(f"❌ Failed to download {link}. Skipping...")
                 continue
             
-            actual_is_folder = downloaded.is_dir()
-            if is_folder and not actual_is_folder:
-                print("⚠️ You said folder but received a file. Processing as file.")
+            # ----- FIX: Check if multiple files downloaded (Mega folder case) -----
+            all_items = [p for p in Path(download_dir).iterdir() if not p.name.startswith('.')]
+            
+            # If user said folder, but downloaded is a file AND there are multiple files in download_dir
+            # then treat the entire download_dir as a virtual folder
+            if is_folder and not downloaded.is_dir() and len(all_items) > 1:
+                print(f"⚠️ Multiple files downloaded (not in a subfolder). Treating entire download_dir as a folder.")
+                downloaded = Path(download_dir)
+                # Also set is_folder to True (already true, but just to be safe)
+                is_folder = True
+            elif is_folder and not downloaded.is_dir() and len(all_items) == 1:
+                # User said folder, but only one file downloaded – treat as single file
+                print("⚠️ You said folder but only one file downloaded. Processing as file.")
                 is_folder = False
-            elif not is_folder and actual_is_folder:
+            elif not is_folder and downloaded.is_dir():
+                # User said file, but downloaded a folder – treat as folder
                 print("⚠️ You said file but received a folder. Processing as folder.")
                 is_folder = True
+            # If user said folder and downloaded.is_dir() is True, it's already a folder – do nothing.
             
             caption = f"Uploaded from {source.capitalize()}! 🚀"
             if is_folder:
