@@ -1,4 +1,4 @@
 telethon==1.35.0
 mediafire
 yt-dlp
-async-mega
+mega.py
