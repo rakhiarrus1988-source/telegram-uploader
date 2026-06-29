@@ -3,116 +3,106 @@ import sys
 import asyncio
 import shutil
 from pathlib import Path
-
-# Ensure dependencies are installed FIRST
 from utils import ensure_dependencies
 ensure_dependencies()
 
-# Now import our modules
 from telethon import TelegramClient
 from downloaders import download_from_mega, download_from_mediafire, download_from_terabox
 from uploader import process_downloaded_item
+from drive_config import get_credentials, SESSION_PATH
 from controls import get_user_action, save_control_state, load_control_state
-
-# (Optional) Google Drive session persistence
-# from google.colab import drive
-# drive.mount('/content/drive')
-# SESSION_PATH = '/content/drive/MyDrive/my_userbot.session'
 
 async def main():
     print("\n🔥 HUMAN-LIKE TELEGRAM UPLOAD BOT 🔥")
     
-    # ---- 1. INPUT API CREDENTIALS ----
-    api_id = input("Apni Telegram API ID dalein: ").strip()
-    api_hash = input("Apna Telegram API Hash dalein: ").strip()
-    
-    if not api_id.isdigit() or not api_hash:
+    # ---- CREDENTIALS (Auto from Drive) ----
+    api_id, api_hash, phone_number, _ = get_credentials()
+    if not api_id or not api_hash or not phone_number:
         print("❌ Invalid credentials.")
         return
     
-    # ---- 2. Source ----
-    print("\nKis source se file/folder laani hai?")
+    # ---- SOURCE ----
+    print("\nKis source se laani hai?")
     print("1. Mega\n2. MediaFire\n3. Terabox")
-    source_choice = input("Option (1/2/3): ").strip()
-    while source_choice not in ['1','2','3']:
-        source_choice = input("❌ Invalid! Choose 1, 2, or 3: ").strip()
+    src = input("Option (1/2/3): ").strip()
+    while src not in ['1','2','3']:
+        src = input("❌ Invalid: ").strip()
+    src_map = {'1':'mega','2':'mediafire','3':'terabox'}
+    source = src_map[src]
     
-    source_map = {'1':'mega', '2':'mediafire', '3':'terabox'}
-    source = source_map[source_choice]
+    # ---- FILE OR FOLDER ----
+    typ = input("\nFile='1', Folder='2': ").strip()
+    while typ not in ['1','2']:
+        typ = input("❌ Invalid: ").strip()
+    is_folder = (typ == '2')
     
-    # ---- 3. File or Folder ----
-    item_type = input("\nKya upload karna hai? (File='1', Folder='2'): ").strip()
-    while item_type not in ['1','2']:
-        item_type = input("❌ Invalid! Enter '1' or '2': ").strip()
-    is_folder = (item_type == '2')
-    
-    # ---- 4. Links ----
+    # ---- LINKS ----
     links = []
     if is_folder:
-        link = input("\nFolder ka link dalein: ").strip()
+        link = input("\nFolder link: ").strip()
         links.append(link)
     else:
         try:
-            count = int(input("Kitni files upload karni hain? (Max 10): ").strip())
-            if count < 1 or count > 10:
-                print("❌ Count must be 1-10.")
+            cnt = int(input("Kitni files? (Max 10): ").strip())
+            if cnt < 1 or cnt > 10:
+                print("❌ 1-10 range.")
                 return
-        except ValueError:
+        except:
             print("❌ Invalid number.")
             return
-        for i in range(count):
-            link = input(f"File link {i+1}/{count}: ").strip()
-            links.append(link)
+        for i in range(cnt):
+            links.append(input(f"File {i+1}/{cnt}: ").strip())
     
-    # ---- 5. Temp Directory ----
     download_dir = "downloads_temp"
     os.makedirs(download_dir, exist_ok=True)
     
-    # ---- 6. Telegram Client ----
+    # ---- TELEGRAM CLIENT ----
     print("\n[3/4] Connecting to Telegram...")
-    session_file = "my_userbot"   # or SESSION_PATH
-    client = TelegramClient(session_file, int(api_id), api_hash, connection_retries=5)
+    client = TelegramClient(SESSION_PATH, int(api_id), api_hash, connection_retries=5)
     
     async with client:
+        if not await client.is_user_authorized():
+            print(f"📱 Sending code to {phone_number}...")
+            await client.send_code_request(phone_number)
+            code = input("Enter OTP code: ").strip()
+            await client.sign_in(phone_number, code)
+            print("✅ Logged in.")
+        else:
+            print("✅ Already logged in.")
+        
         await client.get_me()
         print("[4/4] Processing started...")
         
-        # Track progress
         all_success = True
         failed_links = []
-        current_index = 0
+        current_idx = 0
         
-        # Load saved state if any
         state = load_control_state()
         if state and state.get('links') == links and state.get('source') == source:
-            current_index = state.get('index', 0)
-            print(f"ℹ️ Resuming from link {current_index+1}/{len(links)}")
+            current_idx = state.get('index', 0)
+            print(f"ℹ️ Resuming from link {current_idx+1}/{len(links)}")
         
-        while current_index < len(links):
-            link = links[current_index]
-            print(f"\n🔄 Processing {current_index+1}/{len(links)} from {source}")
+        while current_idx < len(links):
+            link = links[current_idx]
+            print(f"\n🔄 Processing {current_idx+1}/{len(links)}")
             print(f"   Link: {link}")
             
-            # ---- Interactive Control ----
-            action = await get_user_action("▶️ Press Enter to continue, 's' to skip, 'b' to go back, 'q' to quit: ")
+            action = await get_user_action("▶️ Enter to continue, 's' skip, 'b' back, 'q' quit: ")
             if action == 'quit':
-                print("⏹️ User quit. Saving progress...")
-                save_control_state(data={'index': current_index, 'links': links, 'source': source})
+                print("⏹️ Quitting. Progress saved.")
+                save_control_state(data={'index': current_idx, 'links': links, 'source': source})
                 break
             elif action == 'skip':
-                print(f"⏭️ Skipping link {current_index+1}")
-                current_index += 1
+                print(f"⏭️ Skipping.")
+                current_idx += 1
                 continue
             elif action == 'back':
-                if current_index > 0:
-                    print(f"⏪ Going back to link {current_index}")
-                    current_index -= 1
-                else:
-                    print("⚠️ Already at first link.")
+                if current_idx > 0:
+                    current_idx -= 1
+                    print(f"⏪ Going back to {current_idx+1}")
                 continue
-            # else 'continue' -> proceed
             
-            # ---- Download ----
+            # DOWNLOAD
             if source == 'mega':
                 downloaded = await download_from_mega(link, download_dir)
             elif source == 'mediafire':
@@ -121,13 +111,12 @@ async def main():
                 downloaded = await download_from_terabox(link, download_dir)
             
             if downloaded is None:
-                print(f"❌ Failed to download {link}. Skipping...")
+                print(f"❌ Failed. Skipping.")
                 all_success = False
                 failed_links.append(link)
-                current_index += 1
+                current_idx += 1
                 continue
             
-            # ---- Determine type ----
             all_items = [p for p in Path(download_dir).iterdir() if not p.name.startswith('.')]
             if is_folder and not downloaded.is_dir() and len(all_items) > 1:
                 downloaded = Path(download_dir)
@@ -143,31 +132,19 @@ async def main():
             else:
                 caption += f"\nFile: {downloaded.name}"
             
-            # ---- Upload ----
             await process_downloaded_item(client, downloaded, is_folder, caption)
             
-            # ---- After success, increment ----
-            current_index += 1
-            # Save progress (so if we stop, we can resume)
-            save_control_state(data={'index': current_index, 'links': links, 'source': source})
+            current_idx += 1
+            save_control_state(data={'index': current_idx, 'links': links, 'source': source})
         
-        # ---- 8. CLEANUP ----
+        # ---- CLEANUP ----
         if all_success and os.path.exists(download_dir):
-            remaining = list(Path(download_dir).iterdir())
-            if not remaining:
+            if not any(Path(download_dir).iterdir()):
                 shutil.rmtree(download_dir, ignore_errors=True)
-                print("🧹 Temporary folder cleaned up.")
-            else:
-                print(f"⚠️ Download directory contains {len(remaining)} leftover files.")
-        elif not all_success:
-            print("ℹ️ Some downloads failed. Keeping temporary files for resume.")
-        
-        # Delete control state if all done
-        if current_index >= len(links):
-            if os.path.exists('control_state.json'):
-                os.remove('control_state.json')
-                print("🧹 Control state removed.")
-        
+                print("🧹 Temp folder cleaned.")
+        if current_idx >= len(links) and os.path.exists('control_state.json'):
+            os.remove('control_state.json')
+            print("🧹 Control state removed.")
         print("\n🎉 Process completed!")
 
 if __name__ == "__main__":
