@@ -1,2 +1,0 @@
-API_ID = 33410550          # your API ID
-API_HASH = "df5549167570405addef1ba93b09ca5e"
