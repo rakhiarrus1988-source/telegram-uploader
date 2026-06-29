@@ -8,12 +8,13 @@ from pathlib import Path
 from utils import ensure_dependencies
 ensure_dependencies()
 
-# Now import Telethon and our modules
+# Now import our modules
 from telethon import TelegramClient
 from downloaders import download_from_mega, download_from_mediafire, download_from_terabox
 from uploader import process_downloaded_item
+from controls import get_user_action, save_control_state, load_control_state
 
-# (Optional) Google Drive session persistence – for Colab
+# (Optional) Google Drive session persistence
 # from google.colab import drive
 # drive.mount('/content/drive')
 # SESSION_PATH = '/content/drive/MyDrive/my_userbot.session'
@@ -69,45 +70,71 @@ async def main():
     
     # ---- 6. Telegram Client ----
     print("\n[3/4] Connecting to Telegram...")
-    session_file = "my_userbot"   # or SESSION_PATH for Drive
+    session_file = "my_userbot"   # or SESSION_PATH
     client = TelegramClient(session_file, int(api_id), api_hash, connection_retries=5)
     
     async with client:
         await client.get_me()
         print("[4/4] Processing started...")
         
-        # Track success
+        # Track progress
         all_success = True
         failed_links = []
+        current_index = 0
         
-        # ---- 7. Process each link ----
-        for idx, link in enumerate(links, start=1):
-            print(f"\n🔄 Processing {idx}/{len(links)} from {source}...")
+        # Load saved state if any
+        state = load_control_state()
+        if state and state.get('links') == links and state.get('source') == source:
+            current_index = state.get('index', 0)
+            print(f"ℹ️ Resuming from link {current_index+1}/{len(links)}")
+        
+        while current_index < len(links):
+            link = links[current_index]
+            print(f"\n🔄 Processing {current_index+1}/{len(links)} from {source}")
+            print(f"   Link: {link}")
+            
+            # ---- Interactive Control ----
+            action = await get_user_action("▶️ Press Enter to continue, 's' to skip, 'b' to go back, 'q' to quit: ")
+            if action == 'quit':
+                print("⏹️ User quit. Saving progress...")
+                save_control_state(data={'index': current_index, 'links': links, 'source': source})
+                break
+            elif action == 'skip':
+                print(f"⏭️ Skipping link {current_index+1}")
+                current_index += 1
+                continue
+            elif action == 'back':
+                if current_index > 0:
+                    print(f"⏪ Going back to link {current_index}")
+                    current_index -= 1
+                else:
+                    print("⚠️ Already at first link.")
+                continue
+            # else 'continue' -> proceed
+            
+            # ---- Download ----
             if source == 'mega':
                 downloaded = await download_from_mega(link, download_dir)
             elif source == 'mediafire':
                 downloaded = await download_from_mediafire(link, download_dir)
-            else:  # terabox
+            else:
                 downloaded = await download_from_terabox(link, download_dir)
             
             if downloaded is None:
                 print(f"❌ Failed to download {link}. Skipping...")
                 all_success = False
                 failed_links.append(link)
+                current_index += 1
                 continue
             
-            # Check if multiple files in download_dir (Mega folder case)
+            # ---- Determine type ----
             all_items = [p for p in Path(download_dir).iterdir() if not p.name.startswith('.')]
-            
             if is_folder and not downloaded.is_dir() and len(all_items) > 1:
-                print(f"⚠️ Multiple files downloaded. Treating entire download_dir as a folder.")
                 downloaded = Path(download_dir)
                 is_folder = True
             elif is_folder and not downloaded.is_dir() and len(all_items) == 1:
-                print("⚠️ You said folder but only one file downloaded. Processing as file.")
                 is_folder = False
             elif not is_folder and downloaded.is_dir():
-                print("⚠️ You said file but received a folder. Processing as folder.")
                 is_folder = True
             
             caption = f"Uploaded from {source.capitalize()}! 🚀"
@@ -116,22 +143,30 @@ async def main():
             else:
                 caption += f"\nFile: {downloaded.name}"
             
+            # ---- Upload ----
             await process_downloaded_item(client, downloaded, is_folder, caption)
+            
+            # ---- After success, increment ----
+            current_index += 1
+            # Save progress (so if we stop, we can resume)
+            save_control_state(data={'index': current_index, 'links': links, 'source': source})
         
-        # ---- 8. CLEANUP: ONLY if ALL succeeded AND directory is empty ----
+        # ---- 8. CLEANUP ----
         if all_success and os.path.exists(download_dir):
-            # Check if directory is empty (uploader moved all files)
             remaining = list(Path(download_dir).iterdir())
             if not remaining:
                 shutil.rmtree(download_dir, ignore_errors=True)
-                print("🧹 Temporary folder cleaned up (all files uploaded).")
+                print("🧹 Temporary folder cleaned up.")
             else:
-                print(f"⚠️ Download directory contains {len(remaining)} leftover files. Keeping for manual cleanup.")
+                print(f"⚠️ Download directory contains {len(remaining)} leftover files.")
         elif not all_success:
             print("ℹ️ Some downloads failed. Keeping temporary files for resume.")
-            print(f"   Failed links: {failed_links}")
-        else:
-            print("ℹ️ No cleanup needed.")
+        
+        # Delete control state if all done
+        if current_index >= len(links):
+            if os.path.exists('control_state.json'):
+                os.remove('control_state.json')
+                print("🧹 Control state removed.")
         
         print("\n🎉 Process completed!")
 
