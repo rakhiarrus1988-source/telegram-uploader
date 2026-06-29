@@ -8,15 +8,16 @@ from telethon import functions
 from telethon.tl.types import InputPeerSelf, InputMediaUploadedDocument, DocumentAttributeFilename
 import telethon.tl.types as types
 
-# ---------------------- SPEED CONTROL ----------------------
-PARALLEL_CONNECTIONS = 4
-HUMAN_DELAY_MIN = 10
-HUMAN_DELAY_MAX = 20
-# -----------------------------------------------------------
+# ---------------------- SAFE LIMITS (Free Accounts) ----------------------
+PARALLEL_CONNECTIONS = 4        # Safe for free accounts
+CHUNK_SIZE = 512 * 1024         # 512 KB (stable)
+HUMAN_DELAY_MIN = 10            # Minimum delay (seconds)
+HUMAN_DELAY_MAX = 20            # Maximum delay
+# -----------------------------------------------------------------------
 
 async def hyper_upload_file(client, file_path):
     file_size = os.path.getsize(file_path)
-    chunk_size = 512 * 1024
+    chunk_size = CHUNK_SIZE
     total_parts = (file_size + chunk_size - 1) // chunk_size
     file_id = int.from_bytes(os.urandom(8), byteorder='big', signed=True)
     is_big = file_size > 10 * 1024 * 1024
