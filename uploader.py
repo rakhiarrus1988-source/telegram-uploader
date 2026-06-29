@@ -3,24 +3,29 @@ import random
 import asyncio
 import subprocess
 import shutil
+import time
 from telethon import functions
 from telethon.tl.types import InputPeerSelf, InputMediaUploadedDocument, DocumentAttributeFilename
 import telethon.tl.types as types
 
-# ------------------------------------------------------------
-# 1. CHUNKED UPLOAD (YOUR ORIGINAL LOGIC – UNCHANGED)
-# ------------------------------------------------------------
+# ---------------------- SPEED CONTROL ----------------------
+PARALLEL_CONNECTIONS = 4
+HUMAN_DELAY_MIN = 10
+HUMAN_DELAY_MAX = 20
+# -----------------------------------------------------------
+
 async def hyper_upload_file(client, file_path):
-    """Upload a file in chunks with parallel connections (max 4)."""
     file_size = os.path.getsize(file_path)
-    chunk_size = 512 * 1024  # 512 KB per chunk
+    chunk_size = 512 * 1024
     total_parts = (file_size + chunk_size - 1) // chunk_size
     file_id = int.from_bytes(os.urandom(8), byteorder='big', signed=True)
-    is_big = file_size > 10 * 1024 * 1024  # >10 MB uses big file API
+    is_big = file_size > 10 * 1024 * 1024
 
     print(f"   📥 Uploading to Saved Messages...")
     uploaded_bytes = 0
-    semaphore = asyncio.Semaphore(4)  # Safe for free accounts
+    semaphore = asyncio.Semaphore(PARALLEL_CONNECTIONS)
+    start_time = time.time()
+    last_print_time = 0
 
     async def upload_part(part_index, chunk_data):
         nonlocal uploaded_bytes
@@ -39,8 +44,27 @@ async def hyper_upload_file(client, file_path):
                     bytes=chunk_data
                 ))
             uploaded_bytes += len(chunk_data)
-            percentage = (uploaded_bytes / file_size) * 100
-            print(f'\r   🚀 Uploading: {percentage:.2f}% ({uploaded_bytes}/{file_size} bytes)', end='')
+            
+            if time.time() - last_print_time > 0.5:
+                elapsed = time.time() - start_time
+                speed = uploaded_bytes / elapsed if elapsed > 0 else 0
+                percentage = (uploaded_bytes / file_size) * 100
+                
+                if speed > 1024**2:
+                    speed_str = f"{speed/(1024**2):.2f} MB/s"
+                elif speed > 1024:
+                    speed_str = f"{speed/1024:.2f} KB/s"
+                else:
+                    speed_str = f"{speed:.2f} B/s"
+                
+                if speed > 0:
+                    remaining = (file_size - uploaded_bytes) / speed
+                    eta = time.strftime("%H:%M:%S", time.gmtime(remaining))
+                else:
+                    eta = "calculating..."
+                
+                print(f'\r   🚀 Uploading: {percentage:.2f}%  |  Speed: {speed_str}  |  ETA: {eta}    ', end='')
+                last_print_time = time.time()
 
     tasks = []
     with open(file_path, 'rb') as f:
@@ -54,21 +78,16 @@ async def hyper_upload_file(client, file_path):
     print("\n   📦 Processing file in Telegram servers...")
     return file_id, total_parts, is_big
 
-# ------------------------------------------------------------
-# 2. SINGLE FILE UPLOAD (WITH AUTO-SPLIT >1.95 GB)
-# ------------------------------------------------------------
 async def upload_single_file_logic(client, original_file, caption_prefix):
-    """Upload a single file – splits into parts if >1.95 GB."""
     file_size_bytes = os.path.getsize(original_file)
-    max_size_bytes = 1950 * 1024 * 1024  # 1.95 GB (safe for Telegram)
+    max_size_bytes = 1950 * 1024 * 1024
     files_to_upload = []
 
     if file_size_bytes > max_size_bytes:
         print(f"⚠️ File >2GB, splitting into 1.9GB parts...")
         split_command = f'split -b 1950M "{original_file}" "{original_file}.part"'
         subprocess.run(split_command, shell=True)
-        os.remove(original_file)  # Remove original after splitting
-        # Collect the part files (sorted by name)
+        os.remove(original_file)
         files_to_upload = sorted([f for f in os.listdir('.') if f.startswith(f"{original_file}.part")])
     else:
         files_to_upload = [original_file]
@@ -103,28 +122,16 @@ async def upload_single_file_logic(client, original_file, caption_prefix):
         ))
         print(f"\n✅ File Piece uploaded successfully.")
 
-        # Auto-delete part file after upload
         if os.path.exists(current_file):
             os.remove(current_file)
 
-        # Human-like delay
-        sleep_time = random.randint(10, 20)
+        sleep_time = random.randint(HUMAN_DELAY_MIN, HUMAN_DELAY_MAX)
         print(f"💤 Human-like delay: {sleep_time}s")
         await asyncio.sleep(sleep_time)
 
-# ------------------------------------------------------------
-# 3. PROCESS DOWNLOADED ITEM (UPDATED WITH LOGGING & SAFE NAMING)
-# ------------------------------------------------------------
 async def process_downloaded_item(client, item_path, is_folder, caption_prefix):
-    """
-    Process a downloaded file or folder.
-    For folders: recursively find all files and upload each with a unique name
-    (so that files with same base name from different subfolders don't overwrite).
-    Also prints detailed logs so you can see what's being uploaded.
-    """
     if is_folder:
         print(f"\n📂 Processing folder: {item_path}")
-        # Collect all files recursively
         all_files = []
         for root, dirs, files in os.walk(item_path):
             for f in files:
@@ -143,13 +150,8 @@ async def process_downloaded_item(client, item_path, is_folder, caption_prefix):
             print(f"   {idx}. {rel_path}")
 
         for idx, file_path in enumerate(all_files, start=1):
-            # Create a unique safe name using the relative path
             relative_path = os.path.relpath(file_path, item_path)
             safe_name = relative_path.replace(os.sep, '_')
-            # (Optional) replace spaces and other problematic chars
-            # safe_name = safe_name.replace(' ', '_').replace('&', '_')
-
-            # Move the file to current directory with the safe name
             shutil.move(file_path, safe_name)
             print(f"\n📄 [{idx}/{total}] Uploading: {safe_name} (original: {relative_path})")
 
@@ -159,10 +161,8 @@ async def process_downloaded_item(client, item_path, is_folder, caption_prefix):
                 f"{caption_prefix}\nFile {idx}/{total}"
             )
 
-        # After uploading all files, remove the empty folder
         shutil.rmtree(item_path, ignore_errors=True)
 
     else:
-        # Single file
         print(f"\n📄 Processing single file: {item_path}")
         await upload_single_file_logic(client, str(item_path), caption_prefix)
