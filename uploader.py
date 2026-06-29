@@ -103,8 +103,9 @@ async def upload_single_file_logic(client, original_file, caption_prefix):
         ))
         print(f"\n✅ File Piece uploaded successfully.")
 
+        # Auto-delete part file after upload
         if os.path.exists(current_file):
-            os.remove(current_file)  # Clean up part file after upload
+            os.remove(current_file)
 
         # Human-like delay
         sleep_time = random.randint(10, 20)
@@ -112,16 +113,17 @@ async def upload_single_file_logic(client, original_file, caption_prefix):
         await asyncio.sleep(sleep_time)
 
 # ------------------------------------------------------------
-# 3. PROCESS DOWNLOADED ITEM (UPDATED FOR SAFE NESTED FOLDERS)
+# 3. PROCESS DOWNLOADED ITEM (UPDATED WITH LOGGING & SAFE NAMING)
 # ------------------------------------------------------------
 async def process_downloaded_item(client, item_path, is_folder, caption_prefix):
     """
     Process a downloaded file or folder.
     For folders: recursively find all files and upload each with a unique name
     (so that files with same base name from different subfolders don't overwrite).
+    Also prints detailed logs so you can see what's being uploaded.
     """
     if is_folder:
-        print(f"📂 Processing folder: {item_path}")
+        print(f"\n📂 Processing folder: {item_path}")
         # Collect all files recursively
         all_files = []
         for root, dirs, files in os.walk(item_path):
@@ -135,19 +137,21 @@ async def process_downloaded_item(client, item_path, is_folder, caption_prefix):
             shutil.rmtree(item_path, ignore_errors=True)
             return
 
-        print(f"📁 Found {total} file(s) inside the folder.")
+        print(f"📁 Found {total} file(s) inside the folder:")
+        for idx, fpath in enumerate(all_files, start=1):
+            rel_path = os.path.relpath(fpath, item_path)
+            print(f"   {idx}. {rel_path}")
 
         for idx, file_path in enumerate(all_files, start=1):
-            # ----- SAFE UNIQUE NAME -----
-            # Replace path separators with underscores to avoid name clashes
-            relative_path = os.path.relpath(file_path, item_path)  # e.g., "subfolder/file.txt"
-            safe_name = relative_path.replace(os.sep, '_')         # e.g., "subfolder_file.txt"
-            # Also replace any other problematic characters (optional)
-            # safe_name = safe_name.replace(' ', '_')  # uncomment if needed
+            # Create a unique safe name using the relative path
+            relative_path = os.path.relpath(file_path, item_path)
+            safe_name = relative_path.replace(os.sep, '_')
+            # (Optional) replace spaces and other problematic chars
+            # safe_name = safe_name.replace(' ', '_').replace('&', '_')
 
-            # Move file to current directory with the safe name
+            # Move the file to current directory with the safe name
             shutil.move(file_path, safe_name)
-            print(f"📄 [{idx}/{total}] Uploading: {safe_name} (original: {relative_path})")
+            print(f"\n📄 [{idx}/{total}] Uploading: {safe_name} (original: {relative_path})")
 
             await upload_single_file_logic(
                 client,
@@ -160,5 +164,5 @@ async def process_downloaded_item(client, item_path, is_folder, caption_prefix):
 
     else:
         # Single file
-        print(f"📄 Processing single file: {item_path}")
+        print(f"\n📄 Processing single file: {item_path}")
         await upload_single_file_logic(client, str(item_path), caption_prefix)
