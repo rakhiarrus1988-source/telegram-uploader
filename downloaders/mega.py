@@ -1,88 +1,112 @@
 import os
-import subprocess
-import re
+import asyncio
 import time
 from pathlib import Path
-
-def convert_mega_link(link):
-    """Convert new-style Mega links to old format compatible with megadl."""
-    link = link.strip()
-    # Folder: https://mega.nz/folder/ABC#xyz → https://mega.nz/#F!ABC!xyz
-    match = re.match(r'https?://mega\.nz/folder/([^#]+)#(.+)', link)
-    if match:
-        return f"https://mega.nz/#F!{match.group(1)}!{match.group(2)}"
-    # File: https://mega.nz/file/ABC#xyz → https://mega.nz/#!ABC!xyz
-    match = re.match(r'https?://mega\.nz/file/([^#]+)#(.+)', link)
-    if match:
-        return f"https://mega.nz/#!{match.group(1)}!{match.group(2)}"
-    return link
+from async_mega import Mega
+from async_mega.errors import MegaError
 
 async def download_from_mega(link, dest_dir):
-    """Download from Mega using megadl (no --verbose)."""
+    """
+    Download from Mega using async-mega library.
+    Works with both file and folder links (new or old format).
+    Shows real-time progress.
+    """
     print(f"⬇️ Downloading from Mega: {link}")
-    converted = convert_mega_link(link)
-    if converted != link:
-        print(f"   🔄 Converted to: {converted}")
     os.makedirs(dest_dir, exist_ok=True)
     
-    # Without --verbose – some versions show progress by default
-    cmd = f'megadl --path "{dest_dir}" "{converted}"'
-    print(f"   🔧 Running: {cmd}")
+    try:
+        # Create Mega client (anonymous login – works for public links)
+        client = Mega()
+        await client.login_anonymous()
+        print("   🔑 Logged in anonymously.")
+    except Exception as e:
+        print(f"   ⚠️ Anonymous login failed: {e}")
+        # Try without login (some public links work)
+        client = Mega()
     
-    process = subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
-    )
-    
-    output_lines = []
-    start_time = time.time()
-    last_progress = ""
-    
-    while True:
-        line = process.stdout.readline()
-        if not line:
-            if process.poll() is not None:
-                break
-            continue
+    try:
+        # Get file/folder node from link
+        node = await client.get_node_from_link(link)
+        node_type = node['type']  # 0 = file, 1 = folder
         
-        line = line.strip()
-        output_lines.append(line)
+        if node_type == 0:
+            # ----- Single File -----
+            file_name = node['name']
+            dest_path = os.path.join(dest_dir, file_name)
+            print(f"   📄 Downloading file: {file_name}")
+            
+            # Download with progress
+            start_time = time.time()
+            last_update = 0
+            
+            def progress_callback(current, total):
+                nonlocal last_update
+                if time.time() - last_update > 0.5:
+                    percent = (current / total) * 100
+                    elapsed = time.time() - start_time
+                    speed = current / elapsed if elapsed > 0 else 0
+                    speed_str = f"{speed/(1024**2):.2f} MB/s" if speed > 1024**2 else f"{speed/1024:.2f} KB/s"
+                    if speed > 0:
+                        remaining = (total - current) / speed
+                        eta = time.strftime("%H:%M:%S", time.gmtime(remaining))
+                    else:
+                        eta = "calculating..."
+                    print(f"\r   📥 Downloading: {percent:.1f}% | Speed: {speed_str} | ETA: {eta}    ", end='')
+                    last_update = time.time()
+            
+            await client.download_node(node, dest_dir, callback=progress_callback)
+            print()  # newline after progress
+            print(f"   ✅ File downloaded: {file_name}")
+            return Path(dest_path)
         
-        # Check for quota/limit errors
-        if "quota" in line.lower() or "limit" in line.lower():
-            print(f"\n⚠️ Mega quota limit reached. Stopping.")
-            process.kill()
+        elif node_type == 1:
+            # ----- Folder -----
+            folder_name = node['name']
+            folder_path = os.path.join(dest_dir, folder_name)
+            print(f"   📂 Downloading folder: {folder_name}")
+            
+            # Get all files in folder (recursive)
+            files = await client.get_files_in_node(node)
+            total_files = len(files)
+            print(f"   📁 Found {total_files} file(s) in folder.")
+            
+            for idx, file_node in enumerate(files, start=1):
+                file_name = file_node['name']
+                print(f"\n   📄 [{idx}/{total_files}] Downloading: {file_name}")
+                
+                # Download each file with progress
+                start_time = time.time()
+                last_update = 0
+                
+                def progress_callback(current, total):
+                    nonlocal last_update
+                    if time.time() - last_update > 0.5:
+                        percent = (current / total) * 100
+                        elapsed = time.time() - start_time
+                        speed = current / elapsed if elapsed > 0 else 0
+                        speed_str = f"{speed/(1024**2):.2f} MB/s" if speed > 1024**2 else f"{speed/1024:.2f} KB/s"
+                        if speed > 0:
+                            remaining = (total - current) / speed
+                            eta = time.strftime("%H:%M:%S", time.gmtime(remaining))
+                        else:
+                            eta = "calculating..."
+                        print(f"\r      📥 Downloading: {percent:.1f}% | Speed: {speed_str} | ETA: {eta}    ", end='')
+                        last_update = time.time()
+                
+                await client.download_node(file_node, folder_path, callback=progress_callback)
+                print()  # newline after progress
+                print(f"      ✅ Downloaded: {file_name}")
+            
+            print(f"\n   ✅ Folder downloaded: {folder_name} (Total: {total_files} files)")
+            return Path(folder_path)
+        
+        else:
+            print(f"❌ Unknown node type: {node_type}")
             return None
-        
-        # Try to extract percentage from lines like "Downloaded 10%"
-        percent_match = re.search(r'(\d+)%', line)
-        if percent_match:
-            percent = int(percent_match.group(1))
-            elapsed = time.time() - start_time
-            # Speed/ETA are not easy without verbose, but we show percentage
-            print(f"\r   📥 Downloading: {percent}%  |  Time: {elapsed:.0f}s", end='')
-            last_progress = line
-        elif line and "error" not in line.lower():
-            # If no percentage, just print the line (maybe progress bar style)
-            if not line.startswith("--") and not line.startswith("["):
-                print(f"   {line}")
     
-    print()  # newline after progress
-    
-    if process.returncode != 0:
-        print(f"❌ megadl failed with code {process.returncode}")
-        for line in output_lines[-5:]:
-            print(f"   {line}")
+    except MegaError as e:
+        print(f"❌ Mega error: {e}")
         return None
-    
-    all_items = [p for p in Path(dest_dir).iterdir() if not p.name.startswith('.')]
-    if not all_items:
-        print("❌ No files/folders downloaded.")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
         return None
-    
-    print(f"📁 Downloaded {len(all_items)} item(s): {[p.name for p in all_items]}")
-    return all_items[0] if len(all_items) == 1 else all_items[0]
