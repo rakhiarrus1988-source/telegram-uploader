@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Telegram session files
+*.session
+*.session-journal
+
+# Config files (Drive config backup)
+*.json
+config.py
+.env
+
+# Temporary download folder
+downloads_temp/
+*.part*
+*.part
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
