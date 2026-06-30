@@ -33,7 +33,8 @@ async def download_from_mega(link, dest_dir):
                 print("   ⚠️ Login failed. Trying next...")
                 continue
 
-            node = m.get_node_from_link(link)   # original link, no conversion
+            # Get node from link (works with both old and new formats)
+            node = m.get_node_from_link(link)
             if node is None:
                 print("   ⚠️ Could not get node. Trying next...")
                 continue
