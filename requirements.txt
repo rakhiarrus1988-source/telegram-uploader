@@ -1,7 +1,4 @@
 telethon==1.35.0
 mediafire
 yt-dlp
-mega.py
-tenacity>=8.0.0
-pycryptodome>=3.19.0
 requests
