@@ -2,61 +2,41 @@ import os
 import json
 import time
 import subprocess
-import re
-import signal
+import socket
 import asyncio
-import requests
 from pathlib import Path
+from mega import Mega
 
 PROGRESS_FILE = "/content/drive/MyDrive/mega_download_progress.json"
 
 # ------------------------------------------------------------
-# 1. INSTALL JAVA & MEGABASTERD CLI
+# 1. SETUP TOR + PRIVOXY
 # ------------------------------------------------------------
-def setup_java_megabasterd():
-    """Install Java and download MegaBasterd CLI JAR."""
-    # Install Java if not present
+def setup_tor_privoxy():
+    """Install Tor and Privoxy, start both services."""
     subprocess.run("sudo apt-get update -qq", shell=True)
-    subprocess.run("sudo apt-get install -y default-jre wget -qq", shell=True)
+    subprocess.run("sudo apt-get install -y tor privoxy -qq", shell=True)
 
-    # Download MegaBasterd JAR (latest release)
-    jar_path = "/tmp/MegaBasterd.jar"
-    if not os.path.exists(jar_path):
-        print("📦 Downloading MegaBasterd CLI...")
-        # GitHub release URL (replace with latest version)
-        url = "https://github.com/tonikelz/MegaBasterd/releases/download/v4.8.2/MegaBasterd.jar"
-        try:
-            r = requests.get(url, stream=True)
-            with open(jar_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print("✅ MegaBasterd downloaded.")
-        except Exception as e:
-            print(f"❌ Failed to download MegaBasterd: {e}")
-            return False
-    return True
-
-def setup_tor_polipo():
-    """Install and start Tor + Polipo."""
-    subprocess.run("sudo apt-get install -y tor polipo -qq", shell=True)
-
-    polipo_conf = """
-    socksParentProxy = localhost:9050
-    socksProxyType = socks5
-    proxyAddress = 0.0.0.0
-    proxyPort = 8123
+    # Configure Privoxy to forward to Tor SOCKS5
+    privoxy_config = """
+    forward-socks5t   /               127.0.0.1:9050 .
+    listen-address  0.0.0.0:8118
     """
-    with open("/tmp/polipo.conf", "w") as f:
-        f.write(polipo_conf)
+    with open("/tmp/privoxy.conf", "w") as f:
+        f.write(privoxy_config)
 
+    # Start Tor
     subprocess.Popen("sudo tor --RunAsDaemon 1", shell=True)
-    subprocess.Popen(f"sudo polipo -c /tmp/polipo.conf", shell=True)
-    time.sleep(5)
-    print("✅ Tor and Polipo running (HTTP proxy on port 8123).")
+    # Start Privoxy with custom config
+    subprocess.Popen(f"sudo privoxy --no-daemon /tmp/privoxy.conf", shell=True)
+
+    time.sleep(5)  # Wait for services to initialize
+    print("✅ Tor running (SOCKS5 on port 9050)")
+    print("✅ Privoxy running (HTTP proxy on port 8118)")
 
 def renew_tor_ip():
+    """Send NEWNYM signal to Tor for a fresh IP."""
     try:
-        import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect(("127.0.0.1", 9051))
         s.send(b"AUTHENTICATE \"\"\r\nSIGNAL NEWNYM\r\n")
@@ -65,104 +45,168 @@ def renew_tor_ip():
         print("   🔄 Tor IP renewed.")
         return True
     except Exception as e:
-        print(f"   ⚠️ Tor renewal failed: {e}")
+        print(f"   ⚠️ IP renewal failed: {e}")
         return False
 
 # ------------------------------------------------------------
-# 2. MEGA DOWNLOADER USING MEGABASTERD CLI
+# 2. DOWNLOAD WITH MEGA.PY + PRIVOXY (HTTP PROXY)
 # ------------------------------------------------------------
 async def download_from_mega(link, dest_dir):
     print(f"⬇️ Downloading from Mega: {link}")
     os.makedirs(dest_dir, exist_ok=True)
 
-    # Setup Java + MegaBasterd, Tor/Polipo
-    if not setup_java_megabasterd():
-        return None
-    setup_tor_polipo()
+    # Setup Tor + Privoxy
+    setup_tor_privoxy()
 
-    # Load progress (folder ID)
+    # Load progress
     progress = load_progress()
     completed_files = progress.get("completed", []) if progress else []
     folder_id = progress.get("folder_id") if progress else None
 
-    # MegaBasterd command
-    jar_path = "/tmp/MegaBasterd.jar"
-    # Proxy: Polipo on port 8123
-    proxy = "http://localhost:8123"
-    # Output directory
-    out_dir = dest_dir
+    # Use Privoxy HTTP proxy (port 8118)
+    proxy_dict = {
+        'http': 'http://127.0.0.1:8118',
+        'https': 'http://127.0.0.1:8118'
+    }
 
-    # Build command: java -jar MegaBasterd.jar -headless -proxy ... -download ...
-    cmd = [
-        "java", "-jar", jar_path,
-        "-headless",
-        f"-proxy={proxy}",
-        f"-download={link}",
-        f"-output={out_dir}",
-        "-resume"  # enable resume
-    ]
+    try:
+        # Login via Privoxy proxy
+        m = Mega().login_anonymous(proxies=proxy_dict)
+        if m is None:
+            print("❌ Failed to login via Privoxy. Trying without proxy...")
+            m = Mega().login_anonymous()
+            if m is None:
+                return None
 
-    print(f"   🔧 Running MegaBasterd CLI with Tor proxy...")
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
-    )
+        # Get node
+        node = m.get_node_from_link(link)
+        if node is None:
+            print("❌ Could not get node.")
+            return None
 
-    output_lines = []
-    quota_hit = False
-    start_time = time.time()
+        node_type = node.get('type')
+        current_folder_id = node.get('id')
 
-    while True:
-        line = process.stdout.readline()
-        if not line:
-            if process.poll() is not None:
-                break
-            continue
-        line = line.strip()
-        output_lines.append(line)
+        if folder_id and folder_id != current_folder_id:
+            completed_files = []
+        elif not folder_id:
+            completed_files = []
 
-        # Detect quota error (MegaBasterd prints "Quota exceeded" or "509")
-        if "quota" in line.lower() or "509" in line:
-            print("\n   ⚠️ Quota limit reached. Renewing Tor IP...")
-            quota_hit = True
+        # ----- FILE -----
+        if node_type == 0:
+            fname = node.get('name')
+            dest = os.path.join(dest_dir, fname)
+            print(f"   📄 Downloading file: {fname}")
+            ok = await download_file_with_progress(m, node, dest)
+            if ok:
+                return Path(dest)
+            else:
+                return None
+
+        # ----- FOLDER -----
+        elif node_type == 1:
+            folder_name = node.get('name')
+            folder_path = os.path.join(dest_dir, folder_name)
+            os.makedirs(folder_path, exist_ok=True)
+
+            all_files = get_all_files(m, node)
+            total = len(all_files)
+            if total == 0:
+                print("   ⚠️ Folder is empty.")
+                return None
+
+            remaining = [f for f in all_files if f['name'] not in completed_files]
+            if not remaining:
+                print("   ✅ All files already downloaded!")
+                delete_progress()
+                return Path(folder_path)
+
+            print(f"   📂 Folder: {folder_name} - {len(remaining)}/{total} files remaining")
+
+            for idx, fnode in enumerate(remaining, start=1):
+                fname = fnode['name']
+                print(f"\n   📄 [{idx}/{len(remaining)}] Downloading: {fname}")
+                dest = os.path.join(folder_path, fname)
+                ok = await download_file_with_progress(m, fnode, dest)
+                if ok:
+                    completed_files.append(fname)
+                    save_progress(completed_files, current_folder_id)
+                else:
+                    # Check if quota error
+                    if "quota" in str(ok).lower() or "509" in str(ok):
+                        print("   ⚠️ Quota hit! Renewing Tor IP...")
+                        renew_tor_ip()
+                        await asyncio.sleep(3)
+                        # Restart download from beginning (progress saved)
+                        return await download_from_mega(link, dest_dir)
+                    else:
+                        print(f"   ❌ Failed to download {fname}")
+                        return None
+            else:
+                print(f"\n   ✅ Folder fully downloaded: {folder_name}")
+                delete_progress()
+                return Path(folder_path)
+
+        else:
+            print(f"❌ Unknown node type: {node_type}")
+            return None
+
+    except Exception as e:
+        if "quota" in str(e).lower() or "509" in str(e):
+            print("   ⚠️ Quota hit. Renewing Tor IP and retrying...")
             renew_tor_ip()
-            process.kill()
-            break
-
-        # Show progress (MegaBasterd outputs percentage like "Progress: 45%")
-        if "progress" in line.lower() and "%" in line:
-            pct_match = re.search(r'(\d+)%', line)
-            if pct_match:
-                pct = int(pct_match.group(1))
-                elapsed = time.time() - start_time
-                print(f"\r   📥 Downloading: {pct}% | Time: {elapsed:.0f}s", end='')
-
-    print()  # newline
-
-    if quota_hit:
-        print("   🔄 Resuming after IP change...")
-        await asyncio.sleep(3)
-        # Recursively call to resume (progress file will handle)
-        return await download_from_mega(link, dest_dir)
-
-    if process.returncode != 0:
-        print(f"❌ MegaBasterd failed with code {process.returncode}")
-        return None
-
-    # Find downloaded items
-    all_items = [p for p in Path(dest_dir).iterdir() if not p.name.startswith('.')]
-    if not all_items:
-        print("❌ No files downloaded.")
-        return None
-
-    print(f"📁 Downloaded {len(all_items)} item(s).")
-    return all_items[0] if len(all_items) == 1 else all_items[0]
+            await asyncio.sleep(3)
+            return await download_from_mega(link, dest_dir)
+        else:
+            print(f"❌ Download error: {e}")
+            return None
 
 # ------------------------------------------------------------
-# 3. HELPER FUNCTIONS (Progress)
+# 3. HELPER: DOWNLOAD FILE WITH PROGRESS
+# ------------------------------------------------------------
+async def download_file_with_progress(m, node, dest_path):
+    fname = node.get('name')
+    expected = node.get('size')
+    if os.path.exists(dest_path) and expected and os.path.getsize(dest_path) == expected:
+        print(f"      ✅ Already downloaded: {fname}")
+        return True
+    try:
+        start = time.time()
+        def cb(current, total):
+            pct = (current/total)*100
+            elapsed = time.time() - start
+            speed = current/elapsed if elapsed else 0
+            spd = f"{speed/(1024**2):.2f} MB/s" if speed > 1024**2 else f"{speed/1024:.2f} KB/s"
+            eta = time.strftime("%H:%M:%S", time.gmtime((total-current)/speed)) if speed else "calc..."
+            print(f"\r      📥 Downloading: {pct:.1f}% | Speed: {spd} | ETA: {eta}    ", end='')
+        m.download_node(node, dest_path, cb)
+        print()
+        print(f"      ✅ Downloaded: {fname}")
+        return True
+    except Exception as e:
+        if "quota" in str(e).lower() or "509" in str(e):
+            print(f"      ⚠️ Quota exceeded.")
+            return "quota"
+        else:
+            print(f"      ❌ Error: {e}")
+            return False
+
+def get_all_files(m, node):
+    files = []
+    try:
+        children = m.get_files_in_node(node)
+        for child in children:
+            if child['type'] == 0:
+                files.append(child)
+            elif child['type'] == 1:
+                sub = m.get_node_by_id(child['id'])
+                files.extend(get_all_files(m, sub))
+    except:
+        pass
+    return files
+
+# ------------------------------------------------------------
+# 4. PROGRESS HELPERS
 # ------------------------------------------------------------
 def load_progress():
     try:
