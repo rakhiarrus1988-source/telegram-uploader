@@ -12,19 +12,16 @@ PROGRESS_FILE = "/content/drive/MyDrive/mega_download_progress.json"
 MEGABASTERD_JAR = "/tmp/MegaBasterd.jar"
 
 # ------------------------------------------------------------
-# 1. SETUP: Java + MegaBasterd JAR + Tor + Privoxy
+# 1. SETUP FUNCTIONS
 # ------------------------------------------------------------
 def setup_java_megabasterd():
-    """Download MegaBasterd JAR if not present."""
     if os.path.exists(MEGABASTERD_JAR):
         return True
     print("📦 Downloading MegaBasterd CLI...")
     url = "https://github.com/tonikelz/MegaBasterd/releases/download/v4.8.2/MegaBasterd.jar"
     try:
-        r = requests.get(url, stream=True)
-        with open(MEGABASTERD_JAR, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
+        # Use wget instead of requests (more reliable in Colab)
+        subprocess.run(f"wget -O {MEGABASTERD_JAR} {url}", shell=True, check=True)
         print("✅ MegaBasterd downloaded.")
         return True
     except Exception as e:
@@ -32,29 +29,39 @@ def setup_java_megabasterd():
         return False
 
 def setup_tor_privoxy():
-    """Start Tor + Privoxy."""
+    """Start Tor + Privoxy with proper daemon handling."""
     subprocess.run("sudo apt-get update -qq", shell=True)
     subprocess.run("sudo apt-get install -y tor privoxy -qq", shell=True)
 
+    # Write Privoxy config
     privoxy_conf = """
     forward-socks5t   /               127.0.0.1:9050 .
-    listen-address  0.0.0.0:8118
+    listen-address  127.0.0.1:8118
     """
     with open("/tmp/privoxy.conf", "w") as f:
         f.write(privoxy_conf)
 
-    subprocess.Popen("sudo tor --RunAsDaemon 1", shell=True)
-    subprocess.Popen(f"sudo privoxy --no-daemon /tmp/privoxy.conf", shell=True)
+    # Start Tor (daemon mode)
+    subprocess.run("sudo service tor start", shell=True)
+    # Start Privoxy with config
+    subprocess.run(f"sudo privoxy /tmp/privoxy.conf", shell=True)
     time.sleep(5)
-    print("✅ Tor + Privoxy ready (HTTP proxy on 8118).")
+    
+    # Verify proxies are running
+    result = subprocess.run("curl -x http://127.0.0.1:8118 http://check.torproject.org/api/ip -s", shell=True, capture_output=True, text=True)
+    if "IsTor" in result.stdout:
+        print("✅ Tor + Privoxy ready (HTTP proxy on 8118).")
+    else:
+        print("⚠️ Proxy may not be working. Trying fallback...")
+        return False
+    return True
 
 def renew_tor_ip():
-    """Get fresh IP from Tor."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect(("127.0.0.1", 9051))
         s.send(b"AUTHENTICATE \"\"\r\nSIGNAL NEWNYM\r\n")
-        time.sleep(1)
+        time.sleep(2)
         s.close()
         print("   🔄 Tor IP renewed.")
         return True
@@ -69,12 +76,17 @@ async def download_from_mega(link, dest_dir):
     print(f"⬇️ Downloading from Mega: {link}")
     os.makedirs(dest_dir, exist_ok=True)
 
-    # Setup once per session
+    # Setup Java + MegaBasterd + Tor/Privoxy
     if not setup_java_megabasterd():
+        print("❌ MegaBasterd setup failed.")
         return None
-    setup_tor_privoxy()
+    if not setup_tor_privoxy():
+        print("⚠️ Proxy setup failed. Trying without proxy...")
+        proxy_arg = []
+    else:
+        proxy_arg = ["-proxy", "127.0.0.1:8118"]
 
-    # Load progress (folder ID + completed files)
+    # Load progress
     progress = load_progress()
     completed_files = progress.get("completed", []) if progress else []
     folder_id = progress.get("folder_id") if progress else None
@@ -83,13 +95,13 @@ async def download_from_mega(link, dest_dir):
     cmd = [
         "java", "-jar", MEGABASTERD_JAR,
         "-headless",
-        "-proxy=http://127.0.0.1:8118",
+        *proxy_arg,
         f"-download={link}",
         f"-output={dest_dir}",
         "-resume"
     ]
 
-    print("   🔧 Running MegaBasterd CLI...")
+    print(f"   🔧 Running: {' '.join(cmd)}")
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -110,6 +122,7 @@ async def download_from_mega(link, dest_dir):
             continue
         line = line.strip()
         output_lines.append(line)
+        print(f"   DEBUG: {line}")  # Temporary debug
 
         # Quota detection
         if "quota" in line.lower() or "509" in line:
@@ -119,23 +132,25 @@ async def download_from_mega(link, dest_dir):
             process.kill()
             break
 
-        # Progress: e.g., "Progress: 45%"
-        if "progress" in line.lower() and "%" in line:
-            pct_match = re.search(r'(\d+)%', line)
-            if pct_match:
-                pct = int(pct_match.group(1))
-                elapsed = time.time() - start_time
-                print(f"\r   📥 Downloading: {pct}% | Time: {elapsed:.0f}s", end='')
+        # Progress parsing
+        percent_match = re.search(r'(\d+)%', line)
+        if percent_match:
+            pct = int(percent_match.group(1))
+            elapsed = time.time() - start_time
+            print(f"\r   📥 Downloading: {pct}% | Time: {elapsed:.0f}s", end='')
 
     print()  # newline
 
     if quota_hit:
         print("   🔄 Resuming after IP change...")
-        await asyncio.sleep(3)
-        return await download_from_mega(link, dest_dir)   # recursive resume
+        await asyncio.sleep(5)
+        return await download_from_mega(link, dest_dir)
 
     if process.returncode != 0:
         print(f"❌ MegaBasterd failed (code {process.returncode})")
+        # Print last 5 lines for debugging
+        for line in output_lines[-5:]:
+            print(f"   {line}")
         return None
 
     # Find downloaded items
@@ -148,7 +163,7 @@ async def download_from_mega(link, dest_dir):
     return items[0] if len(items) == 1 else items[0]
 
 # ------------------------------------------------------------
-# 3. HELPER FUNCTIONS (Progress)
+# 3. HELPER FUNCTIONS
 # ------------------------------------------------------------
 def load_progress():
     try:
