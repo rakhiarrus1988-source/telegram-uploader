@@ -27,3 +27,5 @@ Upload files/folders from **Mega**, **MediaFire**, or **Terabox** directly to yo
 - **MediaFire**: Uses `mediafire` library.
 - **Terabox**: Uses `terabox-dl` (auto‑installed).
 - You need a **Telegram API ID and Hash** from [my.telegram.org](https://my.telegram.org/apps).
+
+## This code is not ready to use now, please don't use it
