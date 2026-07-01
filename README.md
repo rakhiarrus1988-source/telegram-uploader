@@ -29,4 +29,4 @@ Upload files/folders from **Mega**, **MediaFire**, or **Terabox** directly to yo
 - You need a **Telegram API ID and Hash** from [my.telegram.org](https://my.telegram.org/apps).
 
 ## This code is not ready to use now, please don't use it.
-we're working on it with a book bastic logic
+we're working on it with a boombastic logic
